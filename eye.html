@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Optimized Eye Tracking with Auto-Blink</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
+    <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #111;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      let handpose;
+      let video;
+      let predictions = [];
+      
+      // 平滑移動變數
+      let lerpX = 0;
+      let lerpY = 0;
+      let lerpSpeed = 0.1; 
+
+      // 粒子系統變數
+      let particles = [];
+
+      // --- 自動眨眼相關變數 ---
+      let isBlinking = false;
+      let nextBlinkTime = 0;   // 下一次眨眼的時間點
+      let blinkDuration = 200; // 眨眼持續時間 (毫秒)
+      let blinkEndTime = 0;    // 眨眼結束的時間點
+
+      function setup() {
+        createCanvas(windowWidth, windowHeight);
+        // 【效能優化】限制幀率在 30 FPS，減少運算負擔
+        frameRate(30); 
+
+        colorMode(HSB, 360, 100, 100, 100);
+        angleMode(RADIANS); 
+        noStroke();
+
+        lerpX = width / 2;
+        lerpY = height / 2;
+
+        // 初始化下一次眨眼時間 (1到3秒後)
+        nextBlinkTime = millis() + random(1000, 3000);
+
+        video = createCapture(VIDEO);
+        // 【效能優化】降低攝影機解析度，加快偵測速度
+        video.size(320, 240); 
+        video.hide();
+
+        console.log("載入模型中 (效能優化模式)...");
+        handpose = ml5.handpose(video, modelReady);
+        handpose.on("predict", (results) => {
+          predictions = results;
+        });
+      }
+
+      function modelReady() {
+        console.log("模型已載入！");
+      }
+
+      function windowResized() {
+        resizeCanvas(windowWidth, windowHeight);
+      }
+
+      function draw() {
+        background(240, 80, 15, 30); // 深藍色半透明背景
+
+        let targetX, targetY;
+        let handDetected = false;
+        let currentTime = millis();
+
+        // --- 1. 狀態判斷：是否有手？ ---
+        if (predictions.length > 0) {
+          handDetected = true;
+          // 有偵測到手：重置眨眼狀態，確保追蹤時不眨眼
+          isBlinking = false; 
+          nextBlinkTime = currentTime + random(2000, 4000); // 重置下一次眨眼時間
+
+          let indexFingerTip = predictions[0].annotations.indexFinger[3];
+          // 鏡像映射座標 (注意這裡用 video.width, video.height)
+          targetX = map(indexFingerTip[0], 0, video.width, width, 0);
+          targetY = map(indexFingerTip[1], 0, video.height, 0, height);
+
+          // 產生粒子 (減少產生數量以優化效能)
+          for (let i = 0; i < 2; i++) { 
+            particles.push(new Particle(targetX, targetY));
+          }
+
+        } else {
+          // 沒偵測到手：目標回到中心，並執行自動眨眼邏輯
+          handDetected = false;
+          targetX = width / 2;
+          targetY = height / 2;
+
+          // --- 自動眨眼邏輯 ---
+          if (!isBlinking && currentTime > nextBlinkTime) {
+            // 時間到，開始眨眼
+            isBlinking = true;
+            blinkEndTime = currentTime + blinkDuration;
+          } else if (isBlinking && currentTime > blinkEndTime) {
+            // 眨眼時間結束，張開眼睛
+            isBlinking = false;
+            // 設定下一次隨機眨眼時間 (例如 2 到 5 秒後)
+            nextBlinkTime = currentTime + random(2000, 5000);
+          }
+        }
+
+        // --- 2. 更新粒子系統 ---
+        for (let i = particles.length - 1; i >= 0; i--) {
+          particles[i].update();
+          particles[i].show();
+          if (particles[i].isFinished()) {
+            particles.splice(i, 1);
+          }
+        }
+
+        // --- 3. 眼球平滑移動與繪製 ---
+        lerpX = lerp(lerpX, targetX, lerpSpeed);
+        lerpY = lerp(lerpY, targetY, lerpSpeed);
+
+        let eyeDiameter = min(width, height) * 0.3;
+        let eyeSpacing = eyeDiameter * 1.1;
+        let centerY = height / 2;
+        let leftEyeX = width / 2 - eyeSpacing / 2;
+        let rightEyeX = width / 2 + eyeSpacing / 2;
+
+        // 傳入 isBlinking 狀態
+        drawRealisticEye(leftEyeX, centerY, eyeDiameter, lerpX, lerpY, isBlinking);
+        drawRealisticEye(rightEyeX, centerY, eyeDiameter, lerpX, lerpY, isBlinking);
+
+        // --- 4. 在右下角繪製鏡頭畫面 ---
+        let camWidth = width * 0.25; // 鏡頭寬度佔畫面的 1/4
+        let camHeight = camWidth * (video.height / video.width); // 保持比例
+        let camX = width - camWidth - 20; // 右邊界往左縮 20px
+        let camY = height - camHeight - 20; // 下邊界往上縮 20px
+
+        // 加個半透明邊框讓鏡頭清楚一點
+        fill(0, 0, 0, 50);
+        rect(camX - 5, camY - 5, camWidth + 10, camHeight + 10);
+        // 繪製視訊影像，並水平翻轉以符合鏡像直覺
+        push();
+        translate(camX + camWidth, camY);
+        scale(-1, 1);
+        image(video, 0, 0, camWidth, camHeight);
+        pop();
+      }
+
+      // --- 粒子類別 (稍微加快消失速度以優化) ---
+      class Particle {
+        constructor(x, y) {
+          this.x = x + random(-10, 10);
+          this.y = y + random(-10, 10);
+          this.vx = random(-2, 2);
+          this.vy = random(-2, 2);
+          this.alpha = 100;
+          this.hue = random(0, 360); 
+          this.size = random(5, 15);
+        }
+        update() {
+          this.x += this.vx;
+          this.y += this.vy;
+          this.alpha -= 4; // 加快消失速度
+          this.size *= 0.95;
+        }
+        isFinished() { return this.alpha < 0; }
+        show() {
+          fill(this.hue, 80, 100, this.alpha);
+          ellipse(this.x, this.y, this.size);
+        }
+      }
+
+      // --- 眼球繪製函式 (新增 blinking 參數) ---
+      function drawRealisticEye(eyeX, eyeY, eyeDiameter, targetX, targetY, blinking) {
+        push();
+        translate(eyeX, eyeY);
+
+        // 如果正在眨眼，繪製閉上的眼皮
+        if (blinking) {
+            // 這裡用一個深色的橢圓代表閉上的眼睛，蓋住原本的位置
+            fill(240, 80, 10); // 跟背景類似的深色，或者可以選皮膚色
+            ellipse(0, 0, eyeDiameter, eyeDiameter);
+            // 畫一條閉合的線
+            stroke(0, 0, 0, 50);
+            strokeWeight(4);
+            line(-eyeDiameter/2 * 0.8, 0, eyeDiameter/2 * 0.8, 0);
+            noStroke();
+        } else {
+            // --- 正常張開的眼睛繪製邏輯 (同前一版) ---
+            
+            // 1. 眼白
+            fill(0, 0, 95); // 稍微暗一點的白色
+            ellipse(0, 0, eyeDiameter, eyeDiameter);
+
+            // 2. 計算眼珠位置
+            let eyeRadius = eyeDiameter / 2;
+            let pupilDiameter = eyeDiameter * 0.45;
+            let pupilRadius = pupilDiameter / 2;
+            let maxOffset = (eyeRadius - pupilRadius) * 0.9;
+
+            // 計算相對於眼睛中心的目標向量
+            let dx = targetX - eyeX;
+            let dy = targetY - eyeY;
+            let distToTarget = sqrt(dx*dx + dy*dy);
+
+            let pupilOffsetX, pupilOffsetY;
+
+            if (distToTarget < maxOffset) {
+            pupilOffsetX = dx;
+            pupilOffsetY = dy;
+            } else {
+            let angle = atan2(dy, dx);
+            pupilOffsetX = cos(angle) * maxOffset;
+            pupilOffsetY = sin(angle) * maxOffset;
+            }
+
+            // 3. 繪製眼珠
+            push();
+            translate(pupilOffsetX, pupilOffsetY);
+            fill(0, 0, 10); // 黑色瞳孔
+            ellipse(0, 0, pupilDiameter, pupilDiameter);
+            // 反光
+            fill(0, 0, 100, 80);
+            ellipse(-pupilRadius * 0.3, -pupilRadius * 0.3, pupilDiameter * 0.25);
+            pop();
+        }
+        pop();
+      }
+    </script>
+  </body>
+</html>
