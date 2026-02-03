@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>High Performance Eye Tracking</title>
+    <title>MediaPipe Eye Tracking Final</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
     <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
     <style>
@@ -13,9 +13,6 @@
         overflow: hidden;
         background-color: #111;
       }
-      canvas {
-        display: block;
-      }
     </style>
   </head>
   <body>
@@ -24,53 +21,52 @@
       let video;
       let predictions = [];
       
-      // --- 優化設定 1: 提高跟隨速度 ---
+      // --- 平滑移動參數 ---
       let lerpX = 0;
       let lerpY = 0;
-      // 從 0.1 改為 0.4，數值越大反應越快 (最大 1.0)
-      let lerpSpeed = 0.4; 
+      let lerpSpeed = 0.35; // 數值 0.05~1.0，越大跟隨越快
 
+      // --- 粒子系統 ---
       let particles = [];
-      // --- 優化設定 2: 限制粒子最大數量 ---
-      const MAX_PARTICLES = 40; 
+      const MAX_PARTICLES = 50; // 限制粒子數量以免卡頓
 
-      // 自動眨眼變數
+      // --- 自動眨眼參數 ---
       let isBlinking = false;
       let nextBlinkTime = 0;
-      let blinkDuration = 150; // 眨眼速度也調快一點
       let blinkEndTime = 0;
+      let blinkDuration = 150;
 
       function setup() {
         createCanvas(windowWidth, windowHeight);
-        // 不限制幀率，讓它盡量跑滿 60fps
-        // frameRate(60); 
-
         colorMode(HSB, 360, 100, 100, 100);
-        angleMode(RADIANS); 
+        angleMode(RADIANS); // 使用弧度模式進行三角函數運算
         noStroke();
 
+        // 初始眼球位置在中心
         lerpX = width / 2;
         lerpY = height / 2;
         nextBlinkTime = millis() + 2000;
 
-        // --- 優化設定 3: 降低運算解析度 ---
+        // --- 3. 設置攝影機 (效能優化關鍵) ---
         video = createCapture(VIDEO);
-        // 設定為極低解析度，這對 Handpose 偵測來說已經足夠，但速度會快非常多
+        // 設定極低解析度 (160x120) 以加速 MediaPipe 運算
+        // 這不會影響畫面上眼睛的清晰度，只影響偵測速度
         video.size(160, 120); 
         video.hide();
 
-        console.log("載入極速模式模型中...");
-        // 載入模型
+        console.log("載入 MediaPipe 模型中...");
+        
+        // --- 4. 啟動 Handpose ---
         handpose = ml5.handpose(video, modelReady);
         
-        // 綁定預測事件
+        // 當偵測到手部數據時，存入 predictions 變數
         handpose.on("predict", (results) => {
           predictions = results;
         });
       }
 
       function modelReady() {
-        console.log("模型載入完成！現在應該會很順暢。");
+        console.log("模型載入完成！開始揮手！");
       }
 
       function windowResized() {
@@ -78,29 +74,33 @@
       }
 
       function draw() {
-        // 使用不透明度較高的背景覆蓋，減少殘影計算負擔
-        background(240, 80, 10, 40); 
+        // 使用半透明背景來清除上一幀 (可保留一點點軌跡)
+        background(240, 80, 10, 50); 
 
         let targetX, targetY;
         let handDetected = false;
         let currentTime = millis();
 
-        // --- 1. 偵測與座標計算 ---
+        // --- 5. 處理 MediaPipe 數據 ---
         if (predictions.length > 0) {
           handDetected = true;
-          isBlinking = false; 
+          // 重置眨眼計時 (看著手的時候不眨眼)
+          isBlinking = false;
           nextBlinkTime = currentTime + random(2000, 4000);
 
-          let indexFingerTip = predictions[0].annotations.indexFinger[3];
+          // 取得食指指尖 (Index 8) 座標
+          let indexFinger = predictions[0].annotations.indexFinger[3];
           
-          // 映射座標 (使用 video 的小尺寸進行映射)
-          targetX = map(indexFingerTip[0], 0, video.width, width, 0);
-          targetY = map(indexFingerTip[1], 0, video.height, 0, height);
+          // 座標映射：將 video 的座標 (0~160) 轉換為 螢幕座標 (0~width)
+          // 注意：這裡將 X 軸反轉 (width, 0)，產生「鏡像」效果
+          targetX = map(indexFinger[0], 0, video.width, width, 0);
+          targetY = map(indexFinger[1], 0, video.height, 0, height);
 
-          // 產生粒子 (每次只產生 1 個，減少負擔)
+          // 產生粒子
           particles.push(new Particle(targetX, targetY));
 
         } else {
+          // 沒偵測到手：目標回到畫面中心
           handDetected = false;
           targetX = width / 2;
           targetY = height / 2;
@@ -115,12 +115,10 @@
           }
         }
 
-        // --- 2. 粒子系統優化管理 ---
-        // 限制粒子總數，如果超過就把最舊的刪掉
+        // --- 6. 管理粒子系統 (移除過舊粒子) ---
         if (particles.length > MAX_PARTICLES) {
-            particles.splice(0, particles.length - MAX_PARTICLES);
+          particles.splice(0, particles.length - MAX_PARTICLES);
         }
-
         for (let i = particles.length - 1; i >= 0; i--) {
           particles[i].update();
           particles[i].show();
@@ -129,56 +127,62 @@
           }
         }
 
-        // --- 3. 快速平滑移動 ---
+        // --- 7. 計算眼球平滑移動 (Lerp) ---
         lerpX = lerp(lerpX, targetX, lerpSpeed);
         lerpY = lerp(lerpY, targetY, lerpSpeed);
 
-        // 繪製眼睛
-        let eyeDiameter = min(width, height) * 0.3;
+        // --- 8. 繪製眼睛 ---
+        let eyeDiameter = min(width, height) * 0.3; // 眼睛大小隨視窗縮放
         let eyeSpacing = eyeDiameter * 1.1;
         let centerY = height / 2;
         
+        // 左眼
         drawEye(width / 2 - eyeSpacing / 2, centerY, eyeDiameter, lerpX, lerpY, isBlinking);
+        // 右眼
         drawEye(width / 2 + eyeSpacing / 2, centerY, eyeDiameter, lerpX, lerpY, isBlinking);
 
-        // --- 4. 繪製右下角小鏡頭 ---
-        drawCameraFeed();
+        // --- 9. 右下角顯示鏡頭 ---
+        drawCameraPreview();
       }
 
-      function drawCameraFeed() {
-        let camWidth = width * 0.2; // 縮小鏡頭顯示比例
-        let camHeight = camWidth * (video.height / video.width);
-        let camX = width - camWidth - 10;
-        let camY = height - camHeight - 10;
+      // 繪製鏡頭畫面函式
+      function drawCameraPreview() {
+        let camW = width * 0.2; // 寬度佔畫面 20%
+        let camH = camW * (video.height / video.width);
+        let camX = width - camW - 10;
+        let camY = height - camH - 10;
 
-        // 鏡頭外框
-        fill(0, 80);
-        rect(camX - 2, camY - 2, camWidth + 4, camHeight + 4);
+        // 畫框
+        noFill();
+        stroke(255, 50);
+        strokeWeight(2);
+        rect(camX, camY, camW, camH);
+        noStroke();
 
         push();
-        translate(camX + camWidth, camY);
-        scale(-1, 1);
-        // 這裡繪製 video，雖然 video 原始尺寸只有 160x120，但在這裡會被拉大顯示
-        // 這不影響偵測速度，雖然畫面會有一點點馬賽克，但為了效能是值得的
-        image(video, 0, 0, camWidth, camHeight);
+        translate(camX + camW, camY);
+        scale(-1, 1); // 鏡像翻轉
+        // 雖然來源解析度低，但縮小放在角落看不出來
+        image(video, 0, 0, camW, camH);
         pop();
       }
 
+      // 粒子類別
       class Particle {
         constructor(x, y) {
-          this.x = x + random(-5, 5);
-          this.y = y + random(-5, 5);
-          this.vx = random(-3, 3); // 速度快一點
+          this.x = x + random(-10, 10);
+          this.y = y + random(-10, 10);
+          this.vx = random(-3, 3);
           this.vy = random(-3, 3);
           this.alpha = 100;
-          this.hue = random(0, 360); 
-          this.size = random(5, 15);
+          this.hue = random(0, 360);
+          this.size = random(5, 20);
         }
         update() {
           this.x += this.vx;
           this.y += this.vy;
-          this.alpha -= 8; // 消失速度加快 (原本是 4)
-          this.size *= 0.9;
+          this.alpha -= 6; // 消失速度
+          this.size *= 0.92;
         }
         isFinished() { return this.alpha < 0; }
         show() {
@@ -187,49 +191,55 @@
         }
       }
 
-      function drawEye(eyeX, eyeY, eyeDiameter, targetX, targetY, blinking) {
+      // 眼球繪製函式 (包含眼珠移動限制)
+      function drawEye(eyeX, eyeY, size, targetX, targetY, blink) {
         push();
         translate(eyeX, eyeY);
 
-        if (blinking) {
-            fill(240, 60, 20); 
-            ellipse(0, 0, eyeDiameter, eyeDiameter);
-            stroke(0, 0, 0, 50);
-            strokeWeight(5);
-            line(-eyeDiameter/2 * 0.7, 0, eyeDiameter/2 * 0.7, 0);
+        if (blink) {
+          // 眨眼狀態：畫一條閉合的線
+          fill(240, 60, 20); // 眼皮顏色
+          ellipse(0, 0, size, size); // 蓋住眼白
+          stroke(0, 0, 0, 50);
+          strokeWeight(5);
+          line(-size * 0.35, 0, size * 0.35, 0); // 眼睛閉合線
         } else {
-            // 眼白
-            noStroke();
-            fill(0, 0, 95);
-            ellipse(0, 0, eyeDiameter, eyeDiameter);
+          // 1. 眼白
+          fill(0, 0, 95);
+          ellipse(0, 0, size, size);
 
-            // 眼珠計算
-            let eyeRadius = eyeDiameter / 2;
-            let pupilDiameter = eyeDiameter * 0.45;
-            let maxOffset = (eyeRadius - pupilDiameter/2) * 0.9;
+          // 2. 計算眼珠向量 (限制在眼白內)
+          let eyeRadius = size / 2;
+          let pupilSize = size * 0.45;
+          let pupilRadius = pupilSize / 2;
+          // 眼珠可移動的最大半徑
+          let maxDist = (eyeRadius - pupilRadius) * 0.85; 
 
-            let dx = targetX - eyeX;
-            let dy = targetY - eyeY;
-            let distToTarget = sqrt(dx*dx + dy*dy);
+          let dx = targetX - eyeX;
+          let dy = targetY - eyeY;
+          let distToTarget = sqrt(dx*dx + dy*dy);
+          
+          let pupilX, pupilY;
 
-            let pupilOffsetX, pupilOffsetY;
+          if (distToTarget < maxDist) {
+            // 如果目標在範圍內，直接跟隨
+            pupilX = dx;
+            pupilY = dy;
+          } else {
+            // 如果目標太遠，停在邊界上
+            let angle = atan2(dy, dx);
+            pupilX = cos(angle) * maxDist;
+            pupilY = sin(angle) * maxDist;
+          }
 
-            if (distToTarget < maxOffset) {
-              pupilOffsetX = dx;
-              pupilOffsetY = dy;
-            } else {
-              let angle = atan2(dy, dx);
-              pupilOffsetX = cos(angle) * maxOffset;
-              pupilOffsetY = sin(angle) * maxOffset;
-            }
-
-            // 眼珠
-            translate(pupilOffsetX, pupilOffsetY);
-            fill(0, 0, 10);
-            ellipse(0, 0, pupilDiameter, pupilDiameter);
-            // 反光
-            fill(0, 0, 100, 90);
-            ellipse(-pupilDiameter * 0.2, -pupilDiameter * 0.2, pupilDiameter * 0.25);
+          // 3. 繪製眼珠
+          translate(pupilX, pupilY);
+          fill(0, 0, 10); // 黑眼珠
+          ellipse(0, 0, pupilSize, pupilSize);
+          
+          // 4. 反光
+          fill(0, 0, 100, 80);
+          ellipse(-pupilSize * 0.2, -pupilSize * 0.2, pupilSize * 0.25);
         }
         pop();
       }
