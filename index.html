@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Super Fast Eye Tracking</title>
+    <title>Cross Eye Tracking</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.js"></script>
     <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
     <style>
@@ -11,9 +11,8 @@
         margin: 0;
         padding: 0;
         overflow: hidden;
-        background-color: #111;
+        background-color: #222; /* 深灰背景 */
       }
-      /* 確保畫布沒有卷軸 */
       canvas {
         display: block;
       }
@@ -24,50 +23,53 @@
       let handpose;
       let video;
       let predictions = [];
-      
-      // --- 核心流暢度設定 ---
-      let lerpX = 0;
-      let lerpY = 0;
-      // 提高跟隨速度係數 (0.4 是一個反應快且不抖動的甜蜜點)
-      let lerpSpeed = 0.4; 
 
-      // 粒子系統 (限制數量以保證效能)
-      let particles = [];
-      const MAX_PARTICLES = 30; 
+      // --- 平滑移動變數 (左右眼分開) ---
+      let leftEyeTarget = { x: 0, y: 0 };  // 左眼想看的位置
+      let rightEyeTarget = { x: 0, y: 0 }; // 右眼想看的位置
+      
+      let leftEyeCurrent = { x: 0, y: 0 }; // 左眼實際位置 (Lerp後)
+      let rightEyeCurrent = { x: 0, y: 0 };// 右眼實際位置 (Lerp後)
+
+      let lerpSpeed = 0.3; // 跟隨速度 (0.1~0.5)
+
+      // --- 擴大偵測範圍設定 ---
+      // 數值越大，手不需要動很大幅度，眼睛就會動到底
+      // 0.2 代表忽略鏡頭邊緣 20% 的區域
+      let sensitivityMargin = 0.25; 
 
       // 自動眨眼
-      let isBlinking = false;
       let nextBlinkTime = 0;
       let blinkEndTime = 0;
-      let blinkDuration = 150;
+      let isBlinking = false;
 
       function setup() {
         createCanvas(windowWidth, windowHeight);
-        colorMode(HSB, 360, 100, 100, 100);
         angleMode(RADIANS);
         noStroke();
 
-        lerpX = width / 2;
-        lerpY = height / 2;
+        // 初始化位置在中心
+        leftEyeTarget = { x: width / 2, y: height / 2 };
+        rightEyeTarget = { x: width / 2, y: height / 2 };
+        leftEyeCurrent = { x: width / 2, y: height / 2 };
+        rightEyeCurrent = { x: width / 2, y: height / 2 };
+
         nextBlinkTime = millis() + 2000;
 
-        // --- 效能關鍵：極低解析度攝像頭 ---
+        // --- 1. 效能優化與隱藏鏡頭 ---
         video = createCapture(VIDEO);
-        // 設定 160x120 讓 AI 運算量最小化，速度最快
-        video.size(160, 120); 
-        video.hide(); // 隱藏 HTML 元素，且我們不在畫布上畫它
+        video.size(160, 120); // 低解析度運算，速度最快
+        video.hide();
 
-        console.log("啟動極速偵測模式...");
-        
-        // 載入模型
-        handpose = ml5.handpose(video, () => {
-          console.log("模型準備完成！");
-        });
-        
-        // 監聽預測結果
+        console.log("載入模型中...");
+        handpose = ml5.handpose(video, modelReady);
         handpose.on("predict", (results) => {
           predictions = results;
         });
+      }
+
+      function modelReady() {
+        console.log("模型準備完成！");
       }
 
       function windowResized() {
@@ -75,123 +77,152 @@
       }
 
       function draw() {
-        // 使用不透明度較高的背景，減少瀏覽器繪圖負擔
-        background(240, 80, 10, 40);
+        background(30); // 乾淨的背景
 
-        let targetX, targetY;
-        let handDetected = false;
         let currentTime = millis();
+        let handDetected = false;
 
-        // --- 1. 處理手部偵測數據 ---
+        // 預設目標回到中心 (如果手放下的話)
+        // 但我們不希望它瞬間彈回，所以如果沒偵測到，目標設為中心
+        let defaultX = width / 2;
+        let defaultY = height / 2;
+
+        // 重置目標變數，準備接收新的偵測 (如果沒有手，就保持看中間)
+        // 注意：這裡我們不直接重置 leftEyeTarget，而是透過邏輯判斷是否更新它
+        let foundRightHand = false;
+        let foundLeftHand = false;
+
+        // --- 2. 解析手部數據 ---
         if (predictions.length > 0) {
           handDetected = true;
-          isBlinking = false;
+          isBlinking = false; // 有手的時候不眨眼
           nextBlinkTime = currentTime + random(2000, 4000);
 
-          // 取得食指指尖
-          let indexFinger = predictions[0].annotations.indexFinger[3];
-          
-          // 座標映射：從 160x120 映射到 全螢幕
-          // X 軸 (width, 0) 反向映射，實現鏡像效果
-          targetX = map(indexFinger[0], 0, video.width, width, 0);
-          targetY = map(indexFinger[1], 0, video.height, 0, height);
+          for (let i = 0; i < predictions.length; i++) {
+            let pred = predictions[i];
+            
+            // 取得食指座標
+            let rawX = pred.annotations.indexFinger[3][0];
+            let rawY = pred.annotations.indexFinger[3][1];
 
-          // 產生粒子 (少量)
-          particles.push(new Particle(targetX, targetY));
+            // --- 座標映射 (擴大範圍) ---
+            // 使用 sensitivityMargin 來裁切邊緣，讓手不用伸太長
+            // video.width * sensitivityMargin 是起始點
+            // video.width * (1 - sensitivityMargin) 是終點
+            // clamp: true (限制數值不超出螢幕)
+            let mappedX = map(
+              rawX, 
+              video.width * sensitivityMargin, 
+              video.width * (1 - sensitivityMargin), 
+              width, 
+              0, 
+              true
+            );
+            
+            let mappedY = map(
+              rawY, 
+              video.height * sensitivityMargin, 
+              video.height * (1 - sensitivityMargin), 
+              0, 
+              height, 
+              true
+            );
 
-        } else {
-          // 無手勢：回到中心
-          handDetected = false;
-          targetX = width / 2;
-          targetY = height / 2;
+            // --- 交叉控制邏輯 ---
+            // MediaPipe 的 label 通常是 "Right" 或 "Left"
+            // 注意：這是指「那隻手是使用者的右手」，但在鏡頭裡通常是鏡像的
+            
+            // 邏輯：
+            // 使用者的右手 (Right Hand) -> 控制螢幕上的左眼 (Left Eye)
+            // 使用者的左手 (Left Hand) -> 控制螢幕上的右眼 (Right Eye)
+            
+            if (pred.label === 'Right') {
+                leftEyeTarget = { x: mappedX, y: mappedY };
+                foundRightHand = true;
+            } else if (pred.label === 'Left') {
+                rightEyeTarget = { x: mappedX, y: mappedY };
+                foundLeftHand = true;
+            } else {
+                // 如果模型偶爾沒判斷出左右手，預設給兩眼都看
+                leftEyeTarget = { x: mappedX, y: mappedY };
+                rightEyeTarget = { x: mappedX, y: mappedY };
+                foundRightHand = true;
+                foundLeftHand = true;
+            }
+          }
+        }
 
-          // 自動眨眼邏輯
-          if (!isBlinking && currentTime > nextBlinkTime) {
+        // 如果某隻手沒被偵測到，那對應的眼睛看中間
+        if (!foundRightHand) leftEyeTarget = { x: defaultX, y: defaultY };
+        if (!foundLeftHand) rightEyeTarget = { x: defaultX, y: defaultY };
+
+        // --- 自動眨眼 (沒手的時候) ---
+        if (!handDetected) {
+           if (!isBlinking && currentTime > nextBlinkTime) {
             isBlinking = true;
-            blinkEndTime = currentTime + blinkDuration;
+            blinkEndTime = currentTime + 150;
           } else if (isBlinking && currentTime > blinkEndTime) {
             isBlinking = false;
             nextBlinkTime = currentTime + random(2000, 5000);
           }
         }
 
-        // --- 2. 粒子系統 (高效能版) ---
-        // 強制刪除過多的粒子
-        if (particles.length > MAX_PARTICLES) {
-          particles.splice(0, particles.length - MAX_PARTICLES);
-        }
+        // --- 3. 平滑移動運算 (Lerp) ---
+        leftEyeCurrent.x = lerp(leftEyeCurrent.x, leftEyeTarget.x, lerpSpeed);
+        leftEyeCurrent.y = lerp(leftEyeCurrent.y, leftEyeTarget.y, lerpSpeed);
         
-        for (let i = particles.length - 1; i >= 0; i--) {
-          let p = particles[i];
-          p.update();
-          p.show();
-          if (p.isFinished()) {
-            particles.splice(i, 1);
-          }
-        }
-
-        // --- 3. 平滑移動運算 ---
-        lerpX = lerp(lerpX, targetX, lerpSpeed);
-        lerpY = lerp(lerpY, targetY, lerpSpeed);
+        rightEyeCurrent.x = lerp(rightEyeCurrent.x, rightEyeTarget.x, lerpSpeed);
+        rightEyeCurrent.y = lerp(rightEyeCurrent.y, rightEyeTarget.y, lerpSpeed);
 
         // --- 4. 繪製眼睛 ---
-        let eyeDiameter = min(width, height) * 0.3;
-        let eyeSpacing = eyeDiameter * 1.1;
+        let eyeDiameter = min(width, height) * 0.28; // 眼睛大小
+        let eyeSpacing = eyeDiameter * 1.2;
         let centerY = height / 2;
-        
-        drawEye(width / 2 - eyeSpacing / 2, centerY, eyeDiameter, lerpX, lerpY, isBlinking);
-        drawEye(width / 2 + eyeSpacing / 2, centerY, eyeDiameter, lerpX, lerpY, isBlinking);
-        
-        // 注意：這裡完全移除了 drawCameraPreview()，不會顯示鏡頭畫面
-      }
 
-      // --- 粒子類別 ---
-      class Particle {
-        constructor(x, y) {
-          this.x = x + random(-8, 8);
-          this.y = y + random(-8, 8);
-          this.vx = random(-4, 4); // 速度快一點
-          this.vy = random(-4, 4);
-          this.alpha = 100;
-          this.hue = random(0, 360);
-          this.size = random(8, 20);
-        }
-        update() {
-          this.x += this.vx;
-          this.y += this.vy;
-          this.alpha -= 10; // 消失極快，避免畫面堆積
-          this.size *= 0.9;
-        }
-        isFinished() { return this.alpha < 0; }
-        show() {
-          fill(this.hue, 80, 100, this.alpha);
-          ellipse(this.x, this.y, this.size);
-        }
+        // 畫左眼 (跟隨 Right Hand)
+        drawRealisticEye(
+            width / 2 - eyeSpacing / 2, 
+            centerY, 
+            eyeDiameter, 
+            leftEyeCurrent.x, 
+            leftEyeCurrent.y, 
+            isBlinking
+        );
+
+        // 畫右眼 (跟隨 Left Hand)
+        drawRealisticEye(
+            width / 2 + eyeSpacing / 2, 
+            centerY, 
+            eyeDiameter, 
+            rightEyeCurrent.x, 
+            rightEyeCurrent.y, 
+            isBlinking
+        );
       }
 
       // --- 眼球繪製函式 ---
-      function drawEye(eyeX, eyeY, size, targetX, targetY, blink) {
+      function drawRealisticEye(eyeX, eyeY, size, targetX, targetY, blink) {
         push();
         translate(eyeX, eyeY);
 
         if (blink) {
-          // 眨眼樣式
-          fill(240, 60, 20);
+          // 閉眼效果
+          fill(50); // 眼皮顏色(深灰)
           ellipse(0, 0, size, size);
-          stroke(0, 0, 0, 50);
-          strokeWeight(6);
-          line(-size * 0.35, 0, size * 0.35, 0);
+          stroke(0);
+          strokeWeight(4);
+          line(-size * 0.4, 0, size * 0.4, 0);
         } else {
           // 1. 眼白
           noStroke();
-          fill(0, 0, 95);
+          fill(245);
           ellipse(0, 0, size, size);
 
-          // 2. 計算眼珠移動 (物理限制)
+          // 2. 計算眼珠物理限制
           let eyeRadius = size / 2;
           let pupilSize = size * 0.45;
           let pupilRadius = pupilSize / 2;
-          let maxDist = (eyeRadius - pupilRadius) * 0.85; // 限制移動範圍
+          let maxDist = (eyeRadius - pupilRadius) * 0.9; // 90% 的移動範圍
 
           let dx = targetX - eyeX;
           let dy = targetY - eyeY;
@@ -199,6 +230,7 @@
           
           let pupilX, pupilY;
 
+          // 判斷是否超出眼白範圍
           if (distToTarget < maxDist) {
             pupilX = dx;
             pupilY = dy;
@@ -210,12 +242,12 @@
 
           // 3. 眼珠
           translate(pupilX, pupilY);
-          fill(0, 0, 10);
+          fill(20); // 黑眼珠
           ellipse(0, 0, pupilSize, pupilSize);
           
-          // 4. 反光
-          fill(0, 0, 100, 90);
-          ellipse(-pupilSize * 0.2, -pupilSize * 0.2, pupilSize * 0.25);
+          // 4. 反光 (讓眼睛有神)
+          fill(255, 150);
+          ellipse(-pupilSize * 0.25, -pupilSize * 0.25, pupilSize * 0.25);
         }
         pop();
       }
